@@ -1,0 +1,193 @@
+# ===== INSTALL TWILIO =====  
+!pip install -q twilio
+
+# ===== IMPORTS =====
+from google.colab import drive
+import zipfile, os, numpy as np, shutil
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.utils import load_img, img_to_array
+from tensorflow.keras import layers, models
+from twilio.rest import Client
+import matplotlib.pyplot as plt
+
+# ===== MOUNT DRIVE (OPTIONAL) =====
+drive.mount('/content/drive')
+
+# ===== UNZIP DATA =====
+with zipfile.ZipFile("/content/person file .zip", 'r') as zip_ref:
+    zip_ref.extractall("person_dataset/person")
+
+with zipfile.ZipFile("/content/dog file .zip", 'r') as zip_ref:
+    zip_ref.extractall("person_dataset/not_person")
+
+with zipfile.ZipFile("/content/test file .zip", 'r') as zip_ref:
+    zip_ref.extractall("test_images")
+
+# ===== DATA GENERATORS =====
+datagen = ImageDataGenerator(rescale=1./255, validation_split=0.2)
+
+train_data = datagen.flow_from_directory(
+    "person_dataset",
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='training'
+)
+
+val_data = datagen.flow_from_directory(
+    "person_dataset",
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='validation'
+)
+
+# ===== CNN MODEL =====
+model = models.Sequential([
+    layers.Conv2D(32, (3,3), activation='relu', input_shape=(224,224,3)),
+    layers.MaxPooling2D(2,2),
+    layers.Conv2D(64, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    layers.Conv2D(128, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(64, activation='relu'),
+    layers.Dropout(0.3),
+    layers.Dense(2, activation='softmax')
+])
+
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+model.fit(train_data, epochs=10, validation_data=val_data)
+
+# ===== TWILIO SETUP =====
+# ⚠️ Replace with your actual credentials
+TWILIO_ACCOUNT_SID = ""
+TWILIO_AUTH_TOKEN = ""
+TWILIO_SANDBOX_NUMBER = "whatsapp:"   # WhatsApp sandbox
+TWILIO_PHONE_NUMBER = ""               # Your Twilio SMS number
+MY_WHATSAPP_NUMBER = "whatsapp:"     # Your WhatsApp
+MY_PHONE_NUMBER = ""                 # Your normal phone number
+
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# ===== FUNCTIONS FOR WHATSAPP + SMS =====
+def send_whatsapp_message(message):
+    try:
+        client.messages.create(
+            body=message,
+            from_=TWILIO_SANDBOX_NUMBER,
+            to=MY_WHATSAPP_NUMBER
+        )
+        print("✅ WhatsApp message sent!")
+    except Exception as e:
+        print("❌ WhatsApp message failed:", e)
+
+def send_sms_message(message):
+    try:
+        client.messages.create(
+            body=message,
+            from_=TWILIO_PHONE_NUMBER,
+            to=MY_PHONE_NUMBER
+        )
+        print("✅ SMS sent!")
+    except Exception as e:
+        print("❌ SMS failed:", e)
+
+# ===== CLASSIFY TEST IMAGES =====
+class_labels = list(train_data.class_indices.keys())
+test_folder = "test_images"
+class_counts = {cls: 0 for cls in class_labels}
+
+def classify_image(img_path, model):
+    img = load_img(img_path, target_size=(224, 224))
+    img_array = img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = img_array / 255.0
+
+    predictions = model.predict(img_array)
+    predicted_class = class_labels[np.argmax(predictions)]
+    confidence = np.max(predictions) * 100
+
+    result = f"{os.path.basename(img_path)} → {predicted_class} ({confidence:.2f}%)"
+    print(result)
+    
+    class_counts[predicted_class] += 1
+    
+    # Send both WhatsApp and SMS
+    send_whatsapp_message(result)
+    send_sms_message(result)
+
+# Run classification on all test images
+for fname in os.listdir(test_folder):
+    if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+        classify_image(os.path.join(test_folder, fname), model)
+
+# ===== PLOT BAR CHART =====
+plt.figure(figsize=(6,4))
+plt.bar(class_counts.keys(), class_counts.values(), color=['blue', 'orange'])
+plt.xlabel('Class')
+plt.ylabel('Number of Images')
+plt.title('Test Data Classification Counts')
+plt.tight_layout()
+
+chart_path = '/content/classification_counts.png'
+plt.savefig(chart_path)
+plt.close()
+print(f"Bar chart saved to {chart_path}")
+
+# ===== UPLOAD BAR CHART TO GOOGLE DRIVE =====
+drive_path = '/content/drive/MyDrive/classification_counts.png'
+
+if os.path.exists(drive_path):
+    os.remove(drive_path)
+
+shutil.move(chart_path, drive_path)
+print(f"Moved bar chart to Drive: {drive_path}")
+
+# ===== SHARE BAR CHART IMAGE LINK =====
+from google.colab import auth
+auth.authenticate_user()
+
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+drive_service = build('drive', 'v3')
+
+results = drive_service.files().list(q="name='classification_counts.png' and trashed=false").execute()
+files = results.get('files', [])
+for f in files:
+    drive_service.files().delete(fileId=f['id']).execute()
+
+file_metadata = {'name': 'classification_counts.png'}
+media = MediaFileUpload(drive_path, mimetype='image/png')
+
+uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+permission = {'type': 'anyone', 'role': 'reader'}
+drive_service.permissions().create(fileId=uploaded_file['id'], body=permission).execute()
+
+public_url = f"https://drive.google.com/uc?export=view&id={uploaded_file['id']}"
+print("Public URL for chart:", public_url)
+
+# Send chart to WhatsApp and SMS
+try:
+    client.messages.create(
+        from_=TWILIO_SANDBOX_NUMBER,
+        to=MY_WHATSAPP_NUMBER,
+        media_url=[public_url]
+    )
+    print("✅ Bar chart sent to WhatsApp!")
+except Exception as e:
+    print("❌ Failed to send WhatsApp image:", e)
+
+try:
+    client.messages.create(
+        body="Here is the CNN classification bar chart 📊",
+        from_=TWILIO_PHONE_NUMBER,
+        to=MY_PHONE_NUMBER,
+        media_url=[public_url]
+    )
+    print("✅ Bar chart sent via SMS!")
+except Exception as e:
+    print("❌ Failed to send SMS image:", e)
