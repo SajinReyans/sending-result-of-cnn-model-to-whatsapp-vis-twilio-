@@ -1,0 +1,171 @@
+# ===== IMPORTS =====
+from google.colab import drive
+import zipfile, os, numpy as np, shutil
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.utils import load_img, img_to_array
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+
+# For email sending
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+
+# ===== MOUNT DRIVE (OPTIONAL) =====
+drive.mount('/content/drive')
+
+# ===== UNZIP DATA =====
+with zipfile.ZipFile("/content/person file .zip", 'r') as zip_ref:
+    zip_ref.extractall("/content/person_dataset/person")
+
+with zipfile.ZipFile("/content/dog file .zip", 'r') as zip_ref:
+    zip_ref.extractall("/content/person_dataset/not_person")
+
+with zipfile.ZipFile("/content/test file .zip", 'r') as zip_ref:
+    zip_ref.extractall("/content/test_images")
+
+# ===== DATA GENERATORS =====
+datagen = ImageDataGenerator(rescale=1./255, validation_split=0.2)
+
+train_data = datagen.flow_from_directory(
+    "/content/person_dataset",
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='training'
+)
+
+val_data = datagen.flow_from_directory(
+    "/content/person_dataset",
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='validation'
+)
+
+# ===== CNN MODEL =====
+model = models.Sequential([
+    layers.Conv2D(32, (3,3), activation='relu', input_shape=(224,224,3)),
+    layers.MaxPooling2D(2,2),
+    layers.Conv2D(64, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    layers.Conv2D(128, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(64, activation='relu'),
+    layers.Dropout(0.3),
+    layers.Dense(2, activation='softmax')
+])
+
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+model.fit(train_data, epochs=10, validation_data=val_data)
+
+# ===== EMAIL CONFIGURATION =====
+# ⚠️ Enter your email details here
+EMAIL_ADDRESS = "sajin2917@gmail.com"       # <-- Your email
+EMAIL_PASSWORD = "nhqm wmtv raru ixce"         # <-- Your email app password
+TO_EMAIL = "sajin2917@gmail.com"       # <-- Recipient email
+
+# ===== EMAIL FUNCTIONS =====
+def send_email(subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = TO_EMAIL
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Email sent!")
+    except Exception as e:
+        print("❌ Email failed:", e)
+
+def send_email_with_attachment(subject, body, filepath):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = TO_EMAIL
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        with open(filepath, 'rb') as f:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f'attachment; filename={os.path.basename(filepath)}')
+        msg.attach(part)
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Email with attachment sent!")
+    except Exception as e:
+        print("❌ Failed to send email:", e)
+
+# ===== CLASSIFY TEST IMAGES =====
+class_labels = list(train_data.class_indices.keys())
+test_folder = "/content/test_images"  # Updated for Colab
+class_counts = {cls: 0 for cls in class_labels}
+
+def classify_image(img_path, model):
+    img = load_img(img_path, target_size=(224, 224))
+    img_array = img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = img_array / 255.0
+
+    predictions = model.predict(img_array)
+    predicted_class = class_labels[np.argmax(predictions)]
+    confidence = np.max(predictions) * 100
+
+    result = f"{os.path.basename(img_path)} → {predicted_class} ({confidence:.2f}%)"
+    print(result)
+    
+    class_counts[predicted_class] += 1
+    
+    # Send result via email
+    send_email("CNN Classification Result", result)
+
+# Run classification on all test images
+for fname in os.listdir(test_folder):
+    if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+        classify_image(os.path.join(test_folder, fname), model)
+
+# ===== PLOT BAR CHART =====
+plt.figure(figsize=(6,4))
+plt.bar(class_counts.keys(), class_counts.values(), color=['blue', 'orange'])
+plt.xlabel('Class')
+plt.ylabel('Number of Images')
+plt.title('Test Data Classification Counts')
+plt.tight_layout()
+
+chart_path = '/content/classification_counts.png'
+plt.savefig(chart_path)
+plt.close()
+print(f"Bar chart saved to {chart_path}")
+
+# ===== UPLOAD BAR CHART TO GOOGLE DRIVE =====
+drive_path = '/content/drive/MyDrive/classification_counts.png'
+
+if os.path.exists(drive_path):
+    os.remove(drive_path)
+
+shutil.move(chart_path, drive_path)
+print(f"Moved bar chart to Drive: {drive_path}")
+
+# Send bar chart via email
+send_email_with_attachment(
+    "CNN Classification Bar Chart",
+    "Here is the CNN classification bar chart 📊",
+    drive_path
+)
